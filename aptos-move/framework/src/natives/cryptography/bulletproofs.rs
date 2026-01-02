@@ -337,8 +337,7 @@ fn verify_range_proof(
     // The (Bullet)proof size is $\log_2(num_bits)$ and its verification time is $O(num_bits)$
     context.charge(BULLETPROOFS_PER_BIT_RANGEPROOF_VERIFY * NumArgs::new(bit_length as u64))?;
 
-    let mut ver_trans = Transcript::new(dst.as_slice());
-
+    let mut ver_trans = Transcript::new(Box::leak(dst.into_boxed_slice()));
     let success = range_proof
         .verify_single(
             &BULLETPROOF_GENERATORS,
@@ -373,7 +372,7 @@ fn verify_batch_range_proof(
         },
     };
 
-    let mut ver_trans = Transcript::new(dst.as_slice());
+    let mut ver_trans = Transcript::new(Box::leak(dst.into_boxed_slice()));
 
     let success = range_proof
         .verify_multiple(
