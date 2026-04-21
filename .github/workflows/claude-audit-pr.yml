@@ -1,0 +1,127 @@
+name: Claude Audit PR
+
+# Triggers:
+#   1. A reviewer is requested and it's rubujubi (per task spec).
+#   2. The 'claude-audit' label is added to a PR (so the PR author can trigger
+#      it themselves — GitHub blocks self-reviewer-request).
+#   3. A PR comment contains '@claude' for follow-up questions.
+#
+# Fork PRs intentionally do NOT trigger this workflow (no pull_request_target),
+# because that would expose repository secrets to untrusted code.
+
+on:
+  pull_request:
+    types: [review_requested, labeled]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: claude-audit-pr-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Claude audit
+    runs-on: ubuntu-latest
+
+    # Gate on the trigger type. Only fire when:
+    #   - pull_request events originate from the base repo (not a fork) — forks
+    #     cannot read secrets, so the job would silently fail without this guard,
+    #   - AND one of:
+    #       review_requested from rubujubi, OR
+    #       the 'claude-audit' label was just added, OR
+    #       (for issue_comment) the comment is on a PR and contains '@claude'
+    #       and is not from a bot.
+    if: >-
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (
+          (github.event.action == 'review_requested' && github.event.requested_reviewer.login == 'rubujubi') ||
+          (github.event.action == 'labeled' && github.event.label.name == 'claude-audit')
+        )
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '@claude') &&
+        github.event.comment.user.type != 'Bot'
+      )
+
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_EVENT_NUMBER: ${{ github.event.pull_request.number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            PR_NUMBER="$PR_EVENT_NUMBER"
+          else
+            PR_NUMBER="$ISSUE_NUMBER"
+          fi
+
+          # Fetch head/base SHAs and base ref in one gh call, then batch outputs.
+          read -r HEAD_SHA BASE_SHA BASE_REF < <(
+            gh pr view "$PR_NUMBER" --repo "$REPO" \
+              --json headRefOid,baseRefOid,baseRefName \
+              -q '[.headRefOid, .baseRefOid, .baseRefName] | @tsv'
+          )
+
+          {
+            echo "number=$PR_NUMBER"
+            echo "head_sha=$HEAD_SHA"
+            echo "base_sha=$BASE_SHA"
+            echo "base_ref=$BASE_REF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        env:
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+
+      - name: Load prompt
+        id: load
+        run: |
+          set -euo pipefail
+          {
+            echo 'prompt<<PROMPT_EOF'
+            cat .github/prompts/audit-pr.md
+            echo 'PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Ensure scripts are executable
+        run: chmod +x .claude/agents/audit-pr/scripts/*.sh
+
+      - name: Run Claude audit
+        uses: anthropics/claude-code-action@v1
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          REPO_PATH: ${{ github.workspace }}
+          AGENT_DIR: ${{ github.workspace }}/.claude/agents/audit-pr
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: ${{ steps.load.outputs.prompt }}
+          claude_args: --model claude-opus-4-7 --max-turns 15
