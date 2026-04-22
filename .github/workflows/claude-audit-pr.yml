@@ -14,6 +14,11 @@ on:
     types: [review_requested, labeled]
   issue_comment:
     types: [created]
+  # issue_comment fires on top-level PR comments. Thread replies under inline
+  # review comments fire pull_request_review_comment — separate event, same
+  # intent ("@claude, follow up on this finding"). Subscribe to both.
+  pull_request_review_comment:
+    types: [created]
 
 concurrency:
   group: claude-audit-pr-${{ github.event.pull_request.number || github.event.issue.number }}
@@ -46,6 +51,11 @@ jobs:
         github.event.issue.pull_request != null &&
         contains(github.event.comment.body, '@claude') &&
         github.event.comment.user.type != 'Bot'
+      ) ||
+      (
+        github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        github.event.comment.user.type != 'Bot'
       )
 
     permissions:
@@ -65,10 +75,16 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          # pull_request and pull_request_review_comment events populate
+          # github.event.pull_request.number; issue_comment populates
+          # github.event.issue.number instead.
+          if [[ -n "$PR_EVENT_NUMBER" ]]; then
             PR_NUMBER="$PR_EVENT_NUMBER"
-          else
+          elif [[ -n "$ISSUE_NUMBER" ]]; then
             PR_NUMBER="$ISSUE_NUMBER"
+          else
+            echo "ERROR: could not resolve PR number from event payload" >&2
+            exit 1
           fi
 
           # Fetch head/base SHAs and base ref in one gh call, then batch outputs.
