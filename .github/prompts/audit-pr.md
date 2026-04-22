@@ -3,106 +3,105 @@
 > Loaded by `.github/workflows/claude-audit-pr.yml` and passed to
 > `anthropics/claude-code-action@v1` as the main prompt.
 
-You are running as part of a GitHub Actions workflow on a PR to
-`movementlabsxyz/aptos-core`. The workflow has already determined which mode
-this run should use and exposes it as an env var — your job is to branch on
-that env var, not to re-derive it.
+You are running inside a GitHub Actions workflow. The workflow pre-computed
+`AUDIT_MODE` (either `fresh` or `follow-up`) and exported it as an env var.
+Your job: branch on `$AUDIT_MODE` and execute the corresponding path below.
+Nothing else.
 
-## Environment (read with `Bash`)
+## Hard rules (apply to both modes)
 
-- `AUDIT_MODE` — either `fresh` or `follow-up` (pre-computed by the workflow)
-- `PR_NUMBER` — the PR being audited
-- `BASE_SHA`, `HEAD_SHA` — PR base and head SHAs
-- `REPO_PATH` — absolute path to the aptos-core checkout
-- `AGENT_DIR` — absolute path to `.claude/agents/audit-pr/`
-- `GH_TOKEN` — `gh` CLI auth, scoped to this repo
-- `GITHUB_REPOSITORY` — e.g. `rubujubi/aptos-core` or `movementlabsxyz/aptos-core`
-- `GITHUB_EVENT_NAME` — `pull_request`, `issue_comment`, or `pull_request_review_comment`
-- `COMMENT_ID` — set only when the event is a comment; the triggering comment's ID
+- **Do NOT explore the filesystem.** Do not `ls` directories, do not read
+  files other than those explicitly listed in your mode's steps. The env,
+  the `.claude-pr/` directory, and the workflow YAML are OFF LIMITS — you do
+  not need them.
+- **Do NOT verify env vars.** They are set. Use them.
+- **Do NOT echo the plan.** Execute. The workflow log already shows what you're doing.
+- **Only post comments.** Never commit, push, modify files in the repo, or
+  create/close PRs.
+- Non-interactive. Do not ask for user input.
+
+## Available env vars
+
+All set by the workflow — just use them in commands:
+`$AUDIT_MODE`, `$PR_NUMBER`, `$BASE_SHA`, `$HEAD_SHA`, `$REPO_PATH`,
+`$AGENT_DIR`, `$GH_TOKEN`, `$GITHUB_REPOSITORY`, `$GITHUB_EVENT_NAME`,
+`$COMMENT_ID` (comment events only).
+
+---
 
 ## Mode: `fresh`
 
-When `$AUDIT_MODE == "fresh"`:
-
-**Delegate entirely to the audit-pr subagent.** Do NOT do any analysis
-yourself. Invoke the subagent explicitly by name:
+Read the audit-pr subagent file and delegate entirely:
 
 > Use the **audit-pr** subagent to audit PR #${PR_NUMBER}. It is registered
 > at `.claude/agents/audit-pr.md` and reads its references from `$AGENT_DIR`.
 
-The subagent drives the full pipeline end-to-end:
+The subagent handles everything: diff parsing, subsystem classification,
+risk scoring, security-impact + regression-risk analysis, triage, and
+posting inline review comments + one summary comment that starts with
+`## Claude Audit: PR #${PR_NUMBER}` (literal prefix — used by future
+follow-up detection).
 
-1. Parse the diff via `$AGENT_DIR/scripts/diff-summary.sh`.
-2. Classify subsystems and score risk (`subsystem-taxonomy.yaml`, `risk-scoring.yaml`).
-3. Run security-impact analysis (Medium+) and regression-risk analysis (High+).
-4. Triage findings.
-5. Post **inline review comments** on each finding (severity-tagged
-   `[critical] / [major] / [minor] / [nit]`) AND **one summary comment** that
-   starts with `## Claude Audit: PR #${PR_NUMBER}` — the literal prefix matters
-   because future follow-up runs detect prior audits by that marker.
+Do nothing else. Stop when the subagent stops.
 
-Do not print a trailing stdout message. The PR comments are the deliverable.
+---
 
 ## Mode: `follow-up`
 
-When `$AUDIT_MODE == "follow-up"`:
+Execute these 4 bash commands in sequence. Budget: **8 tool calls max**.
+No exploration. No intermediate file listings. No reading of anything not
+listed here.
 
-A prior Claude audit has already happened on this PR. This run is a follow-up
-`@claude` question. Do NOT invoke the audit-pr subagent. Do NOT re-run the
-pipeline. Answer the question directly.
+### Step 1 — Fetch the question and the prior summary (one Bash call)
 
-Steps:
+```bash
+# Pick the right API endpoint based on comment type.
+if [ "$GITHUB_EVENT_NAME" = "pull_request_review_comment" ]; then
+  COMMENT_API="/repos/$GITHUB_REPOSITORY/pulls/comments/$COMMENT_ID"
+else
+  COMMENT_API="/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID"
+fi
+QUESTION=$(gh api "$COMMENT_API" -q .body)
+echo "=== QUESTION ==="; echo "$QUESTION"; echo
 
-1. **Read the triggering comment.** Use `Bash`:
-   ```
-   gh api "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID"
-   ```
-   (For `pull_request_review_comment` events, use `/pulls/comments/$COMMENT_ID` instead.)
-   Extract the `body` field — that's the user's question.
+# Most recent prior Claude Audit summary (truncated to last 15KB).
+PRIOR=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments \
+  -q '[.comments[] | select(.body | startswith("## Claude Audit: PR"))] | last | .body' \
+  | tail -c 15000)
+echo "=== PRIOR SUMMARY ==="; echo "$PRIOR"
+```
 
-2. **Read the prior audit summary.** Use:
-   ```
-   gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments \
-     -q '.comments[] | select(.body | startswith("## Claude Audit: PR")) | .body' \
-     | tail -c 15000
-   ```
-   This gives you the most recent summary comment. Use it as context.
+### Step 2 — (Optional, only if the question cites a specific file/line)
 
-3. **Read prior inline findings if the question references a specific one.** Use:
-   ```
-   gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments"
-   ```
+Fetch inline findings to cross-reference:
 
-4. **Answer the question.** Keep the reply focused (< 300 words unless the
-   question explicitly asks for depth). Reference specific findings from the
-   prior audit by severity tag and `file:line` when relevant.
+```bash
+gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+  -q '.[] | {path: .path, line: .line, body: .body}' | head -c 20000
+```
 
-5. **Post the reply in the right channel:**
-   - If `$GITHUB_EVENT_NAME == "issue_comment"` → new top-level PR comment:
-     ```
-     gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/reply.md
-     ```
-   - If `$GITHUB_EVENT_NAME == "pull_request_review_comment"` → reply inside
-     the same review thread:
-     ```
-     gh api --method POST \
-       "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments/$COMMENT_ID/replies" \
-       -F body=@/tmp/reply.md
-     ```
+### Step 3 — Write the reply to `/tmp/reply.md`
 
-6. Stop. Do not invoke the subagent. Do not produce any other output.
+Use the Write tool. Aim for **under 300 words** unless the question
+explicitly asks for depth. Reference prior findings by severity tag
+(`[critical] / [major] / [minor] / [nit]`) and `file:line` where relevant.
+Do not repeat the whole summary — add NEW information answering the question.
 
-## Scope constraints (both modes)
+### Step 4 — Post the reply in the right channel (one Bash call)
 
-- Review only the diff against the base branch. aptos-core is ~2M lines — full
-  tree reads blow the token budget.
-- Skip generated files, lockfiles, anything under `target/`, `dist/`, `vendor/`.
-- Do NOT modify the repository. Only post comments.
-- Non-interactive. Do not ask for user input.
+```bash
+if [ "$GITHUB_EVENT_NAME" = "pull_request_review_comment" ]; then
+  # Reply inside the same review thread.
+  gh api --method POST \
+    "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments/$COMMENT_ID/replies" \
+    -F body=@/tmp/reply.md
+else
+  # New top-level PR comment.
+  gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/reply.md
+fi
+```
 
-## End of run
+### Stop
 
-For `fresh` runs: the subagent ends by posting the summary comment. No further
-output required.
-
-For `follow-up` runs: post exactly one reply and stop.
+After Step 4 completes successfully, do nothing else. No subagent invocation.
+No further output. No summary of what you just posted.
