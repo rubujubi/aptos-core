@@ -171,4 +171,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ steps.load.outputs.prompt }}
-          claude_args: --model claude-opus-4-7 --max-turns 15
+          claude_args: --model claude-opus-4-7 --max-turns 15 --verbose
+          # Stream Claude's tool calls and responses into the Actions log so
+          # we can see what it's doing. Required for diagnosing cancellations
+          # and turn-budget blow-ups. Safe for internal PRs; if the audit is
+          # ever run on external contributor PRs touching secrets, consider
+          # toggling this back to false.
+          show_full_output: "true"
