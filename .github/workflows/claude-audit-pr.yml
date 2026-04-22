@@ -22,7 +22,15 @@ on:
 
 concurrency:
   group: claude-audit-pr-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
+  # MUST be false. When Claude posts any comment as part of its work (audit
+  # summary, inline reviews, progress pings), GitHub fires
+  # issue_comment.created / pull_request_review_comment.created back at this
+  # workflow. Those events share the same concurrency group (same PR number),
+  # and cancel-in-progress: true would cause the running audit to cancel
+  # itself mid-execution. The if-gate correctly skips bot-authored comments,
+  # but concurrency evaluates BEFORE the if-gate. See
+  # fix/disable-self-cancel for the root-cause investigation.
+  cancel-in-progress: false
 
 jobs:
   audit:
