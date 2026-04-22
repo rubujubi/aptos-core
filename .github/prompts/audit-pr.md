@@ -3,62 +3,60 @@
 > Loaded by `.github/workflows/claude-audit-pr.yml` and passed to
 > `anthropics/claude-code-action@v1` as the main prompt.
 
-You are running as part of a GitHub Actions workflow that audits a single pull
-request to `movementlabsxyz/aptos-core`. Your job is to invoke the `audit-pr`
-subagent and let it drive the audit pipeline end-to-end.
+You are running as part of a GitHub Actions workflow on a PR to
+`movementlabsxyz/aptos-core`. Your behavior depends on what triggered this run.
 
 ## Environment
 
-The workflow has already exported the following variables; the subagent will
-read them directly:
+The workflow has exported these variables; read them with `Bash`:
 
-- `PR_NUMBER` — the PR being audited
-- `BASE_SHA` — base branch tip (typically `m1`)
-- `HEAD_SHA` — PR head SHA
-- `REPO_PATH` — absolute path to the aptos-core checkout on the runner
-- `AGENT_DIR` — absolute path to `.claude/agents/audit-pr/` (the subagent's references and scripts)
-- `GH_TOKEN` — authenticated token for the `gh` CLI (scoped to this repo)
-- `GITHUB_REPOSITORY`
+- `PR_NUMBER`, `BASE_SHA`, `HEAD_SHA`, `REPO_PATH`, `AGENT_DIR`, `GH_TOKEN`, `GITHUB_REPOSITORY`
 
-## Task
+`GITHUB_EVENT_NAME` (set by Actions) tells you which trigger fired:
 
-Invoke the `audit-pr` subagent explicitly by name. Example:
+- `pull_request` with action `review_requested` or `labeled` → fresh audit
+- `issue_comment` → top-level PR comment containing `@claude`
+- `pull_request_review_comment` → reply inside an inline review thread containing `@claude`
 
-> Use the **audit-pr** subagent to audit PR #${PR_NUMBER}. It is registered at
-> `.claude/agents/audit-pr.md` and will read its references from `$AGENT_DIR`.
+## Step 0: Detect mode
 
-The subagent is responsible for the full pipeline:
+Run this check FIRST, before anything else:
 
-1. Parse the diff (`scripts/diff-summary.sh "$REPO_PATH" "$BASE_SHA" "$HEAD_SHA"`).
-2. Classify subsystems and score risk (`subsystem-taxonomy.yaml`, `risk-scoring.yaml`).
-3. Run security-impact analysis (Medium+) and regression-risk analysis (High+).
-4. Triage findings.
-5. Post **inline review comments** (one per finding, severity-tagged as
-   `[critical] / [major] / [minor] / [nit]`, with concrete suggested fixes)
-   and **one summary comment** (verdict, findings by severity, top 3 to address)
-   on PR #${PR_NUMBER}.
+```bash
+# Search the PR's top-level comments for a prior Claude audit summary.
+PRIOR=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments \
+        -q '[.comments[] | select(.body | startswith("## Claude Audit: PR #"))] | length')
+```
 
-## Scope constraints
+If the event is `issue_comment` or `pull_request_review_comment` AND `$PRIOR > 0`:
 
-- **Review only the diff** against the base branch. Do NOT attempt to read the
-  full aptos-core tree — it is ~2M lines and will exceed the token budget.
-- **Skip** generated files, lockfiles, and anything under `target/`, `dist/`,
-  `vendor/`.
-- **Do NOT** modify the repository. Do not commit, push, or open new PRs — you
-  only post review comments.
-- **Do NOT** ask for user input. The workflow is non-interactive; make the best
-  call with available information.
+→ **Follow-up mode.** Do NOT invoke the audit-pr subagent. Instead:
 
-## Follow-up questions (comment-triggered runs)
+1. Read the triggering comment body (the `@claude …` question).
+2. Read the prior summary comment (fetch the full body via `gh pr view`).
+3. Read any prior inline review comments (`gh api /repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments`).
+4. Answer the question directly, referencing specific finding IDs or summary points from the prior audit.
+5. Post the answer:
+   - If triggered by `issue_comment`: as a new top-level PR comment via `gh pr comment`.
+   - If triggered by `pull_request_review_comment`: as a reply inside the same thread, using the GitHub API with `in_reply_to` = `$COMMENT_ID`.
+6. Stop. Do not re-run the pipeline.
 
-If this run was triggered by an `issue_comment` containing `@claude`, treat the
-commenter's question as additional context. Focus your response on answering it,
-but still run the full audit if this is the first `@claude` mention on the PR.
-Otherwise, post a concise reply referencing the relevant finding IDs or summary
-items from the prior audit.
+Otherwise (fresh audit):
+
+→ Invoke the **audit-pr** subagent (registered at `.claude/agents/audit-pr.md`).
+It will drive the full pipeline: parse diff, classify subsystems, score risk,
+run analyzers, triage, post inline review comments plus one summary comment.
+
+## Scope constraints (apply in both modes)
+
+- Review only the diff against the base branch. aptos-core is ~2M lines — full
+  tree reads blow the token budget.
+- Skip generated files, lockfiles, anything under `target/`, `dist/`, `vendor/`.
+- Do NOT modify the repository. Only post comments.
+- Non-interactive. Do not ask for user input.
 
 ## End of run
 
-The subagent ends the run by posting the summary comment. Nothing else is
-required — do not print a trailing response to stdout; the comments on the PR
-are the output.
+For fresh audits, the subagent ends by posting the summary comment.
+For follow-up mode, you post a single reply and stop.
+No trailing stdout output is required — PR comments are the deliverable.
