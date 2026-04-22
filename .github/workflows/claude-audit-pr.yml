@@ -127,6 +127,34 @@ jobs:
       - name: Ensure scripts are executable
         run: chmod +x .claude/agents/audit-pr/scripts/*.sh
 
+      - name: Detect audit mode
+        id: mode
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Count prior Claude audit summary comments on the PR. Match the
+          # permissive prefix "## Claude Audit: PR" — tolerates both
+          # "PR #N" and "PR N" title variants the subagent has emitted.
+          PRIOR=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+                  -q '[.comments[] | select(.body | startswith("## Claude Audit: PR"))] | length' \
+                  || echo "0")
+
+          # Follow-up mode: comment-triggered AND a prior summary exists.
+          # Otherwise: fresh audit (label, review request, or first @claude).
+          if { [[ "$EVENT_NAME" == "issue_comment" ]] || [[ "$EVENT_NAME" == "pull_request_review_comment" ]]; } \
+             && [[ "${PRIOR:-0}" -gt 0 ]]; then
+            MODE="follow-up"
+          else
+            MODE="fresh"
+          fi
+
+          echo "Detected AUDIT_MODE=$MODE (event=$EVENT_NAME, prior_summaries=$PRIOR)"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude audit
         uses: anthropics/claude-code-action@v1
         env:
@@ -137,6 +165,9 @@ jobs:
           AGENT_DIR: ${{ github.workspace }}/.claude/agents/audit-pr
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          AUDIT_MODE: ${{ steps.mode.outputs.mode }}
+          COMMENT_ID: ${{ github.event.comment.id }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ steps.load.outputs.prompt }}
