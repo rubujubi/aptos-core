@@ -16,8 +16,13 @@ Nothing else.
   not need them.
 - **Do NOT verify env vars.** They are set. Use them.
 - **Do NOT echo the plan.** Execute. The workflow log already shows what you're doing.
-- **Only post comments.** Never commit, push, modify files in the repo, or
-  create/close PRs.
+- **Only post comments.** Never commit, push, modify files outside the
+  temp paths listed below, or create/close PRs.
+- **Write files only inside `$REPO_PATH`** (the runner workspace). Paths
+  under `/tmp/` are blocked by the action's security sandbox. Always use
+  `$REPO_PATH/_claude_reply.md` or similar for temp files. Use bash heredoc
+  (`cat > FILE <<'EOF' ... EOF`), not the Write tool — Write is denied by
+  the permission allow-list.
 - Non-interactive. Do not ask for user input.
 
 ## Available env vars
@@ -73,19 +78,29 @@ echo "=== PRIOR SUMMARY ==="; echo "$PRIOR"
 
 ### Step 2 — (Optional, only if the question cites a specific file/line)
 
-Fetch inline findings to cross-reference:
+Fetch the 10 most recent inline review comments to cross-reference. Slicing
+by record count with `jq` keeps the JSON valid (byte-level truncation can
+cut mid-field).
 
 ```bash
 gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
-  -q '.[] | {path: .path, line: .line, body: .body}' | head -c 20000
+  -q '[.[] | {path: .path, line: .line, body: (.body | .[0:500])}] | .[-10:]'
 ```
 
-### Step 3 — Write the reply to `/tmp/reply.md`
+### Step 3 — Write the reply to `$REPO_PATH/_claude_reply.md`
 
-Use the Write tool. Aim for **under 300 words** unless the question
-explicitly asks for depth. Reference prior findings by severity tag
-(`[critical] / [major] / [minor] / [nit]`) and `file:line` where relevant.
-Do not repeat the whole summary — add NEW information answering the question.
+Use bash heredoc (NOT the Write tool — it's denied by policy):
+
+```bash
+cat > "$REPO_PATH/_claude_reply.md" <<'REPLY_EOF'
+<your reply markdown goes here>
+REPLY_EOF
+```
+
+Aim for **under 300 words** unless the question explicitly asks for depth.
+Reference prior findings by severity tag (`[critical] / [major] / [minor] / [nit]`)
+and `file:line` where relevant. Do not repeat the whole summary — add NEW
+information answering the question.
 
 ### Step 4 — Post the reply in the right channel (one Bash call)
 
@@ -94,10 +109,11 @@ if [ "$GITHUB_EVENT_NAME" = "pull_request_review_comment" ]; then
   # Reply inside the same review thread.
   gh api --method POST \
     "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments/$COMMENT_ID/replies" \
-    -F body=@/tmp/reply.md
+    -F body=@"$REPO_PATH/_claude_reply.md"
 else
   # New top-level PR comment.
-  gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/reply.md
+  gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+    --body-file "$REPO_PATH/_claude_reply.md"
 fi
 ```
 
@@ -105,3 +121,15 @@ fi
 
 After Step 4 completes successfully, do nothing else. No subagent invocation.
 No further output. No summary of what you just posted.
+
+---
+
+## Note on iteration
+
+The `anthropics/claude-code-action@v1` restores `.claude/` (agent files,
+references, settings) from the default branch at runtime — PR-head changes
+to those paths are ignored for security. If you need to iterate on the
+subagent or reference files, merge the change to `main` first, then test
+on a subsequent PR. Workflow YAML + `.github/prompts/` changes DO take
+effect from the PR head (subject to the action's own "matches default
+branch" validation).
