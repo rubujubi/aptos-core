@@ -136,13 +136,18 @@ Emit TWO kinds of output:
 
 Post via the `gh` CLI (already authenticated from `GH_TOKEN`).
 
+**IMPORTANT — temp files must live inside `$REPO_PATH`.** The `claude-code-action` sandbox blocks writes under `/tmp/`. Use `$REPO_PATH/_claude_summary.md`, `$REPO_PATH/_claude_comment_N.md`, etc. Use bash heredoc (`cat > FILE <<'EOF' ... EOF`) — the Write tool is denied by the permission policy.
+
 **Summary comment** — post as a single issue comment on the PR:
 
 ```bash
-gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/summary.md
+cat > "$REPO_PATH/_claude_summary.md" <<'SUMMARY_EOF'
+<full summary markdown>
+SUMMARY_EOF
+gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$REPO_PATH/_claude_summary.md"
 ```
 
-Write the summary body to `/tmp/summary.md` first (multiline markdown), then invoke the command. Using `--body-file` avoids quoting/newline issues that `--body` has with long markdown.
+Using `--body-file` avoids quoting/newline issues that `--body` has with long markdown.
 
 **Inline review comments** — post one per finding via the PR review-comments API. `gh api` is the concrete interface:
 
@@ -162,7 +167,7 @@ Notes on the API call:
 - `side: "RIGHT"` means the line after the diff (the new code). Use `"LEFT"` only if commenting on a line that was deleted.
 - `commit_id` MUST be `$HEAD_SHA` — if you pass any other SHA GitHub rejects the call.
 - For multi-line ranges, add `-F start_line=$N -f start_side="RIGHT"` alongside `line` (which becomes the end line). Only do this if the finding cites a range.
-- Write each `$COMMENT_BODY` to a tempfile and use `-F body=@/tmp/comment-N.md` instead of `-f body=$COMMENT_BODY` if the body contains backticks/quotes — safer for markdown.
+- Write each `$COMMENT_BODY` to a tempfile inside `$REPO_PATH` (e.g., `$REPO_PATH/_claude_comment_N.md`) via `cat > FILE <<'EOF' ... EOF`, then use `-F body=@"$REPO_PATH/_claude_comment_N.md"` instead of `-f body="$COMMENT_BODY"`. This is safer for markdown with backticks/quotes and avoids the `/tmp/` sandbox block.
 
 **Error handling:**
 
