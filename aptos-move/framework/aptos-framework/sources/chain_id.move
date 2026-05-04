@@ -38,4 +38,14 @@ module aptos_framework::chain_id {
         initialize_for_test(aptos_framework, 1u8);
         assert!(get() == 1u8, 1);
     }
+
+    #[test(aptos_framework = @0x1)]
+    /// `initialize_for_test` is idempotent: a second call with a different id
+    /// must NOT overwrite the existing ChainId. This guards callers that may
+    /// re-invoke the helper across nested test setups.
+    fun test_initialize_for_test_is_idempotent(aptos_framework: &signer) acquires ChainId {
+        initialize_for_test(aptos_framework, 1u8);
+        initialize_for_test(aptos_framework, 99u8);
+        assert!(get() == 1u8, 2);
+    }
 }
