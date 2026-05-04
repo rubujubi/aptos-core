@@ -141,18 +141,25 @@ jobs:
           ref: ${{ env.REVIEWER_REF }}
           path: .claude-reviewer
 
-      - name: Stage Claude assets into workspace
-        # Claude Code discovers agents from $CWD/.claude/agents/. Copy the
-        # subagent definition, references, scripts, and settings into the
-        # aptos-core workspace before invoking the action. This materialises
-        # the files at runtime; nothing is committed to aptos-core's tree.
+      - name: Stage Claude assets to user-level
+        # claude-code-action restores the workspace's .claude/ from origin/main
+        # before invoking Claude (security: PR head is untrusted). That wipes
+        # anything we cp into $GITHUB_WORKSPACE/.claude/. So we stage the
+        # subagent definition + references into the runner's user-level
+        # ~/.claude/agents/ instead — the action's restore is workspace-only,
+        # and Claude Code discovers user-level agents alongside project ones.
+        #
+        # The permissions allow-list (.claude/settings.json) is the exception:
+        # it MUST live in aptos-core's main and be restored by the action's
+        # workspace-level mechanism, because the user-level ~/.claude/settings.json
+        # is owned by the action itself ("Setting up Claude settings at:
+        # /home/runner/.claude/settings.json" in the run log).
         run: |
           set -euo pipefail
-          mkdir -p .claude/agents
-          cp -r .claude-reviewer/agents/audit-pr   .claude/agents/
-          cp    .claude-reviewer/agents/audit-pr.md .claude/agents/
-          cp    .claude-reviewer/settings.json     .claude/settings.json
-          chmod +x .claude/agents/audit-pr/scripts/*.sh
+          mkdir -p "$HOME/.claude/agents"
+          cp -r .claude-reviewer/agents/audit-pr   "$HOME/.claude/agents/"
+          cp    .claude-reviewer/agents/audit-pr.md "$HOME/.claude/agents/"
+          chmod +x "$HOME/.claude/agents/audit-pr/scripts/"*.sh
 
       - name: Load prompt
         id: load
@@ -199,7 +206,10 @@ jobs:
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           REPO_PATH: ${{ github.workspace }}
-          AGENT_DIR: ${{ github.workspace }}/.claude/agents/audit-pr
+          # Points at the user-level staged copy (see "Stage Claude assets to
+          # user-level"), NOT $GITHUB_WORKSPACE/.claude/... — the workspace one
+          # is wiped by the action's restore-from-main step.
+          AGENT_DIR: /home/runner/.claude/agents/audit-pr
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
