@@ -8,6 +8,11 @@ name: Claude Audit PR
 #
 # Fork PRs intentionally do NOT trigger this workflow (no pull_request_target),
 # because that would expose repository secrets to untrusted code.
+#
+# Audit *content* (subagent definition, analyzers, prompt, settings) lives in
+# movementlabsxyz/claude-pr-reviewer and is checked out + staged at runtime.
+# Bump REVIEWER_REF below to upgrade. See that repo's README for the consumer
+# contract.
 
 on:
   pull_request:
@@ -31,6 +36,12 @@ concurrency:
   # but concurrency evaluates BEFORE the if-gate. See
   # fix/disable-self-cancel for the root-cause investigation.
   cancel-in-progress: false
+
+env:
+  # Pin to a tag (e.g. v1, v0.1.0) or an immutable SHA. Rolling tags pick up
+  # patches automatically; SHAs require a bump PR but are tamper-evident.
+  REVIEWER_REPO: movementlabsxyz/claude-pr-reviewer
+  REVIEWER_REF: v1
 
 jobs:
   audit:
@@ -123,18 +134,35 @@ jobs:
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$BASE_REF"
 
+      - name: Checkout claude-pr-reviewer
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REVIEWER_REPO }}
+          ref: ${{ env.REVIEWER_REF }}
+          path: .claude-reviewer
+
+      - name: Stage Claude assets into workspace
+        # Claude Code discovers agents from $CWD/.claude/agents/. Copy the
+        # subagent definition, references, scripts, and settings into the
+        # aptos-core workspace before invoking the action. This materialises
+        # the files at runtime; nothing is committed to aptos-core's tree.
+        run: |
+          set -euo pipefail
+          mkdir -p .claude/agents
+          cp -r .claude-reviewer/agents/audit-pr   .claude/agents/
+          cp    .claude-reviewer/agents/audit-pr.md .claude/agents/
+          cp    .claude-reviewer/settings.json     .claude/settings.json
+          chmod +x .claude/agents/audit-pr/scripts/*.sh
+
       - name: Load prompt
         id: load
         run: |
           set -euo pipefail
           {
             echo 'prompt<<PROMPT_EOF'
-            cat .github/prompts/audit-pr.md
+            cat .claude-reviewer/prompts/audit-pr.md
             echo 'PROMPT_EOF'
           } >> "$GITHUB_OUTPUT"
-
-      - name: Ensure scripts are executable
-        run: chmod +x .claude/agents/audit-pr/scripts/*.sh
 
       - name: Detect audit mode
         id: mode
